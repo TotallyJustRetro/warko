@@ -7,7 +7,9 @@ runtime (MBC1/3/5, timer, DMG+CGB PPU, 4-channel APU, OAM/HDMA, double speed, ba
     build/wl3/wl3 "Wario_Land_3__World_.gbc"
 
 Needs: python3, gcc, make, SDL2 dev headers (`sdl2-config`). `HEADLESS=1 ./build.sh ...` builds without SDL.
-Controls: arrows, Z=A, X=B, Enter=Start, Backspace/RShift=Select, Esc quits. Saves go to `<rom>.sav`.
+Controls: arrows or WASD; Z/J = A; X/K = B; Enter/Space = Start; Backspace/Tab/RShift = Select; `-` / `=` volume; Esc quits.
+Gamepads (any SDL-recognised controller): d-pad/left stick, A/Y = A, B/X = B, Start, Back=Select. `--volume N` sets start volume in percent (default 50).
+Frame pacing follows the audio clock (no vsync), so speed and pitch stay correct. Saves go to `<rom>.sav`.
 
 ## How it works
 * `gbrecomp.py` discovers code per ROM bank (vectors/entry + recursive descent + every instruction a
