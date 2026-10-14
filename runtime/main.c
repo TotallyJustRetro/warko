@@ -640,7 +640,7 @@ static void deck_render(void) {
     deck_text_fit(34,109,200,1,255,241,212,value);
     deck_fill(34,120,202,7,69,54,34,255);
     if(treasures>0) deck_fill(34,120,202*treasures/15,7,255,200,87,255);
-    for(int i=0;i<15;i++) deck_gem(35+i*13,174,5,deck_state.treasure_mask>=0&&(deck_state.treasure_mask&(1<<i)));
+    for(int i=0;i<15;i++) deck_gem(35+i*13,174,5,deck_state.valid && (deck_state.treasure_mask & (UINT64_C(1) << i)));
     deck_text(34,188,1,184,170,149,"RELICS FOUND");
     deck_draw_chest(400,142);
     deck_card(556,70,220,133,"EXPEDITION STATUS");
@@ -660,7 +660,7 @@ static void deck_render(void) {
     deck_text_right(762,163,2,255,241,212,value);
     deck_card(20,213,232,218,"TREASURE COLLECTION");
     for(int i=0;i<15;i++) {
-        int found=deck_state.treasure_mask>=0&&(deck_state.treasure_mask&(1<<i));
+        int found=deck_state.valid && (deck_state.treasure_mask & (UINT64_C(1) << i));
         int x=52+(i%5)*40, y=279+(i/5)*37;
         deck_gem(x,y,10,found);
         snprintf(value,sizeof value,"%02d",i+1);
@@ -733,6 +733,11 @@ int main(int argc, char **argv) {
         gb_save(); return 0;
     }
 #ifndef HEADLESS
+    /* Enable native DualSense HIDAPI support before SDL discovers devices.
+       Event lighting is limited to PS5-type pads; all rumble-capable pads may vibrate. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     SDL_Window *w = SDL_CreateWindow("gbrecomp  |  arrows/WASD  Z/J=A  X/K=B  Enter=Start  Bksp=Select  Esc=quit",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 576, SDL_WINDOW_RESIZABLE);
