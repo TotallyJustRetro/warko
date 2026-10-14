@@ -754,6 +754,7 @@ int main(int argc, char **argv) {
     if (ad) { static int16_t silence[738 * 3 * 2]; SDL_QueueAudio(ad, silence, sizeof silence); SDL_PauseAudioDevice(ad, 0); }
     else fprintf(stderr, "audio unavailable: %s\n", SDL_GetError());
     open_pad();
+    if (deck_enabled) deck_set_led(deck_base_led_color());
     int run = 1; uint64_t freq = SDL_GetPerformanceFrequency(), next = SDL_GetPerformanceCounter(), frame = 0;
     const double frame_s = 70224.0 / 4194304.0;
     static int16_t abuf[8192 * 2];
