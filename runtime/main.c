@@ -401,7 +401,7 @@ static void deck_render(void) {
     for(int i=0;i<deck_log_count&&i<5;i++) {
         int y=254+i*32;
         deck_fill(570,y-1,3,14,i==0?255:189,i==0?200:133,i==0?87:55,255);
-        deck_text_fit(580,y,1,184,170,149,deck_log[i]);
+        deck_text_fit(580,y,184,1,184,170,149,deck_log[i]);
     }
     if(deck_treasure_anim) deck_draw_animation();
     SDL_RenderPresent(deck_renderer);
