@@ -60,6 +60,13 @@ void gb_save(void) {
     FILE *s = fopen(p, "wb"); if (s) { fwrite(sram, 1, sram_size, s); fclose(s); sram_dirty = 0; }
 }
 
+/* Host-side HUD/companion API. This deliberately bypasses the cartridge's
+ * RAM-enable latch; some games disable SRAM between ordinary CPU accesses. */
+uint8_t gb_cart_ram_peek(uint16_t offset) {
+    if (!sram || !sram_size) return 0xFF;
+    return sram[(uint32_t)offset % sram_size];
+}
+
 /* ---------------------------------------------------------------- tracing */
 int gb_trace_load(const char *path) {
     if (!g_trace) g_trace = calloc(1, g_rom_size / 8 + 1);
