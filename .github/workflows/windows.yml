@@ -12,6 +12,10 @@ jobs:
           update: false
           install: >-
             mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64-x86_64-python make
+      - name: Test Wario Land II Companion Deck helpers
+        run: |
+          gcc -std=c11 -Wall -Wextra -Iruntime tests/test_wario2_deck_state.c -o test_wario2_deck_state.exe
+          ./test_wario2_deck_state.exe
       - name: Build ROM-independent player
         run: |
           python3 gbrecomp.py --player -o build/player

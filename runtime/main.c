@@ -1,5 +1,6 @@
 /* main.c - frontend. SDL2 window/audio/input by default; -DHEADLESS builds a test harness. */
 #include "gb.h"
+#include "wario2_deck_state.h"
 #include <math.h>
 #ifndef HEADLESS
 #include <SDL2/SDL.h>
@@ -83,12 +84,17 @@ static uint8_t read_input(void) {
 static SDL_Window *deck_window;
 static SDL_Renderer *deck_renderer;
 static int deck_enabled;
+enum { DECK_PROFILE_SML3, DECK_PROFILE_WARIO2 };
+static int deck_profile = DECK_PROFILE_SML3;
 static int deck_baseline;
-static int deck_treasure_anim, deck_treasure_anim_id;
+static int deck_treasure_anim, deck_treasure_anim_id, deck_treasure_anim_kind;
 static uint32_t deck_treasure_anim_started;
+static uint32_t deck_led_restore_at;
+static int deck_led_flash_active;
 
 typedef struct {
-    int valid, course, lives, hearts, power, coins, time_left, treasure_mask;
+    int valid, course, lives, hearts, power, coins, stage_coins, time_left, stage_select;
+    uint64_t treasure_mask, panel_mask;
 } WarioDeckState;
 
 static WarioDeckState deck_state, deck_previous;
@@ -211,6 +217,57 @@ static const char *deck_power_name(int power) {
     switch(power) { case 0:return "SMALL"; case 1:return "GARLIC"; case 2:return "BULL";
         case 3:return "JET"; case 4:return "DRAGON"; default:return "UNKNOWN"; }
 }
+static uint32_t deck_base_led_color(void) {
+    return deck_profile == DECK_PROFILE_WARIO2 ? 0xE0B34F : 0xE4A144;
+}
+static void deck_set_led(uint32_t color) {
+    if (pad && SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5 &&
+        SDL_GameControllerHasLED(pad))
+        SDL_GameControllerSetLED(pad, (Uint8)(color >> 16),
+                                 (Uint8)(color >> 8), (Uint8)color);
+}
+static void deck_feedback(uint32_t color, int strength_pct, Uint32 duration_ms) {
+    if (pad && strength_pct > 0) {
+        if (strength_pct > 100) strength_pct = 100;
+        Uint16 low = (Uint16)(strength_pct * 655);
+        Uint16 high = (Uint16)(strength_pct * 655 * 0.8f);
+        int result = -1;
+        if (SDL_GameControllerHasRumble(pad))
+            result = SDL_GameControllerRumble(pad, low, high, duration_ms);
+        if (result != 0) {
+            SDL_Joystick *joy = SDL_GameControllerGetJoystick(pad);
+            if (joy && SDL_JoystickHasRumble(joy))
+                SDL_JoystickRumble(joy, low, high, duration_ms);
+        }
+    }
+    deck_set_led(color);
+    deck_led_flash_active = 1;
+    deck_led_restore_at = SDL_GetTicks() + (duration_ms < 280 ? 280 : duration_ms);
+}
+static void deck_controller_frame(void) {
+    if (deck_led_flash_active && (Sint32)(SDL_GetTicks() - deck_led_restore_at) >= 0) {
+        deck_set_led(deck_base_led_color());
+        deck_led_flash_active = 0;
+    }
+}
+static int deck_detect_profile(void) {
+    char title[17];
+    memset(title, 0, sizeof title);
+    if (g_rom && g_rom_size > 0x144) {
+        memcpy(title, g_rom + 0x134, 16);
+        title[16] = 0;
+        for (int i = 0; i < 16; ++i)
+            if ((unsigned char)title[i] < 32 || (unsigned char)title[i] > 126)
+                title[i] = 0;
+    }
+    return strstr(title, "WARIOLAND2") ? DECK_PROFILE_WARIO2 : DECK_PROFILE_SML3;
+}
+static uint64_t deck_wario2_flag_mask(uint16_t start_address) {
+    uint8_t bytes[WARIO2_FLAG_BYTES];
+    for (int i = 0; i < WARIO2_FLAG_BYTES; ++i)
+        bytes[i] = gb_rd((uint16_t)(start_address + i));
+    return wario2_flags_from_bytes(bytes);
+}
 static void deck_log_push(const char *entry) {
     for(int i=4;i>0;i--) memcpy(deck_log[i],deck_log[i-1],sizeof deck_log[i]);
     snprintf(deck_log[0],sizeof deck_log[0],"%s",entry?entry:"");
@@ -218,7 +275,23 @@ static void deck_log_push(const char *entry) {
 }
 static WarioDeckState deck_read_state(void) {
     WarioDeckState d;
-    memset(&d,0,sizeof d);
+    memset(&d, 0, sizeof d);
+    if (deck_profile == DECK_PROFILE_WARIO2) {
+        int stage = wario2_bcd_pair(gb_rd(0xC510));
+        d.course = stage >= 1 && stage <= 50 ? stage : -1;
+        d.stage_select = gb_rd(0xC512) & 1;
+        d.coins = wario2_bcd3(gb_rd(0xC50B), gb_rd(0xC50C), gb_rd(0xC50D));
+        int coins_hi = wario2_bcd_pair(gb_rd(0xC50E));
+        int coins_lo = wario2_bcd_pair(gb_rd(0xC50F));
+        d.stage_coins = coins_hi >= 0 && coins_lo >= 0 ? coins_hi * 100 + coins_lo : -1;
+        d.treasure_mask = deck_wario2_flag_mask(0xC504);
+        d.panel_mask = deck_wario2_flag_mask(0xC513);
+        d.lives = d.hearts = d.power = d.time_left = -1;
+        d.valid = d.course >= 1 && d.course <= 50 && d.coins >= 0 &&
+                  d.stage_coins >= 0;
+        return d;
+    }
+
     int course=gb_cart_ram_peek(0x804), life=gb_cart_ram_peek(0x809);
     int hearts=gb_cart_ram_peek(0x808), power=gb_cart_ram_peek(0x80A);
     int lo=gb_cart_ram_peek(0x80E), hi=gb_cart_ram_peek(0x80F);
@@ -227,20 +300,121 @@ static WarioDeckState deck_read_state(void) {
     d.hearts=deck_bcd2((uint8_t)hearts);
     d.power=power<=4?power:-1;
     d.coins=deck_bcd_coins();
+    d.stage_coins=-1;
     d.time_left=deck_bcd_time();
-    d.treasure_mask=(lo!=0xFF&&hi!=0xFF)?(lo|(hi<<8)):-1;
-    d.valid=d.course>=0 && d.lives>=0 && d.hearts>=0 && d.power>=0 && d.treasure_mask>=0;
+    d.treasure_mask=(lo!=0xFF&&hi!=0xFF)?(uint64_t)(lo|(hi<<8)):UINT64_MAX;
+    d.panel_mask=0;
+    d.stage_select=0;
+    d.valid=d.course>=0 && d.lives>=0 && d.hearts>=0 && d.power>=0 && d.treasure_mask!=UINT64_MAX;
     return d;
 }
 static int deck_treasure_count(void) {
-    if(deck_state.treasure_mask<0) return -1;
-    int n=0; for(int i=0;i<15;i++) if(deck_state.treasure_mask&(1<<i)) n++;
-    return n;
+    if (!deck_state.valid || deck_state.treasure_mask == UINT64_MAX) return -1;
+    return wario2_count_flags(deck_state.treasure_mask,
+                              deck_profile == DECK_PROFILE_WARIO2 ? 50 : 15);
 }
+static int deck_panel_count(void) {
+    if (!deck_state.valid) return -1;
+    return deck_profile == DECK_PROFILE_WARIO2
+        ? wario2_count_flags(deck_state.panel_mask, 50) : 0;
+}
+static void deck_update_wario2(const WarioDeckState *next) {
+    if (!next->valid) { deck_baseline = 0; deck_treasure_anim = 0; return; }
+    if (!deck_baseline) {
+        memset(deck_log, 0, sizeof deck_log);
+        deck_log_count = 0;
+        deck_log_push("EXPEDITION LINKED");
+        char entry[64];
+        snprintf(entry, sizeof entry, "STAGE %02d ENTERED", next->course);
+        deck_log_push(entry);
+        deck_previous = *next;
+        deck_baseline = 1;
+        deck_coin_milestone = next->coins >= 0 ? next->coins / 100 : -1;
+        return;
+    }
+
+    if (next->course != deck_previous.course) {
+        char entry[64];
+        snprintf(entry, sizeof entry, "STAGE %02d ENTERED", next->course);
+        deck_log_push(entry);
+        deck_feedback(0x6FC8C0, 30, 140);
+    }
+
+    const uint64_t valid_mask = (UINT64_C(1) << 50) - 1;
+    uint64_t old_treasures = deck_previous.treasure_mask & valid_mask;
+    uint64_t new_treasures = next->treasure_mask & valid_mask;
+    if ((new_treasures & old_treasures) != old_treasures) {
+        deck_log_push("TREASURE RECORD RESTORED");
+        deck_treasure_anim = 0;
+    } else {
+        uint64_t gained = new_treasures & ~old_treasures;
+        if (gained) {
+            for (int bit = 0; bit < 50; ++bit) {
+                if (gained & (UINT64_C(1) << bit)) {
+                    char entry[64];
+                    snprintf(entry, sizeof entry, "TREASURE %02d FOUND", bit + 1);
+                    deck_log_push(entry);
+                }
+            }
+            int bit = 49;
+            while (bit >= 0 && !(gained & (UINT64_C(1) << bit))) --bit;
+            deck_treasure_anim_id = bit + 1;
+            deck_treasure_anim_kind = 0;
+            deck_treasure_anim_started = SDL_GetTicks();
+            deck_treasure_anim = 1;
+            deck_feedback(0xFFD66B, 82, 520);
+        }
+    }
+
+    uint64_t old_panels = deck_previous.panel_mask & valid_mask;
+    uint64_t new_panels = next->panel_mask & valid_mask;
+    if ((new_panels & old_panels) != old_panels) {
+        deck_log_push("PANEL RECORD RESTORED");
+    } else {
+        uint64_t gained = new_panels & ~old_panels;
+        if (gained) {
+            for (int bit = 0; bit < 50; ++bit) {
+                if (gained & (UINT64_C(1) << bit)) {
+                    char entry[64];
+                    snprintf(entry, sizeof entry, "PICTURE PANEL %02d FOUND", bit + 1);
+                    deck_log_push(entry);
+                }
+            }
+            int bit = 49;
+            while (bit >= 0 && !(gained & (UINT64_C(1) << bit))) --bit;
+            deck_treasure_anim_id = bit + 1;
+            deck_treasure_anim_kind = 1;
+            deck_treasure_anim_started = SDL_GetTicks();
+            deck_treasure_anim = 1;
+            deck_feedback(0xB9A0FF, 62, 330);
+        }
+    }
+
+    if (next->coins >= 0 && deck_previous.coins >= 0 && next->coins > deck_previous.coins) {
+        int milestone = next->coins / 100;
+        if (milestone > deck_coin_milestone) {
+            char entry[64];
+            snprintf(entry, sizeof entry, "COIN BANK %05d", milestone * 100);
+            deck_log_push(entry);
+            deck_coin_milestone = milestone;
+            deck_feedback(0xFFD23C, 25, 90);
+        }
+    }
+    if (next->stage_coins >= 0 && deck_previous.stage_coins >= 0 &&
+        next->stage_coins / 10 > deck_previous.stage_coins / 10)
+        deck_feedback(0xFFD23C, 18, 55);
+
+    deck_previous = *next;
+}
+
 static void deck_update(void) {
     if(!deck_enabled) return;
     WarioDeckState next=deck_read_state();
     deck_state=next;
+    if (deck_profile == DECK_PROFILE_WARIO2) {
+        deck_update_wario2(&next);
+        return;
+    }
     if(!next.valid) { deck_baseline=0; deck_treasure_anim=0; return; }
     if(!deck_baseline) {
         memset(deck_log,0,sizeof deck_log); deck_log_count=0;
@@ -252,8 +426,9 @@ static void deck_update(void) {
     }
     if(next.course!=deck_previous.course) {
         char entry[64]; snprintf(entry,sizeof entry,"COURSE %02X ENTERED",next.course&255); deck_log_push(entry);
+        deck_feedback(0xF4AB42, 32, 140);
     }
-    int oldmask=deck_previous.treasure_mask&0x7FFF, newmask=next.treasure_mask&0x7FFF;
+    int oldmask=(int)(deck_previous.treasure_mask&0x7FFF), newmask=(int)(next.treasure_mask&0x7FFF);
     if((newmask&oldmask)!=oldmask) {
         deck_log_push("TIMELINE RESTORED");
         deck_treasure_anim=0;
@@ -264,21 +439,31 @@ static void deck_update(void) {
                 char entry[64]; snprintf(entry,sizeof entry,"TREASURE %02d FOUND",bit+1); deck_log_push(entry);
             }
             int bit=14; while(bit>=0&&!(gained&(1<<bit))) bit--;
-            deck_treasure_anim_id=bit+1; deck_treasure_anim_started=SDL_GetTicks(); deck_treasure_anim=1;
+            deck_treasure_anim_id=bit+1; deck_treasure_anim_kind=0;
+            deck_treasure_anim_started=SDL_GetTicks(); deck_treasure_anim=1;
+            deck_feedback(0xFFD66B, 78, 480);
         }
     }
     if(next.power!=deck_previous.power) {
         char entry[64]; snprintf(entry,sizeof entry,"POWER: %s",deck_power_name(next.power)); deck_log_push(entry);
+        deck_feedback(0xB58AFF, 58, 300);
     }
     if(next.lives>deck_previous.lives) {
         char entry[64]; snprintf(entry,sizeof entry,"EXTRA LIFE + %d",next.lives-deck_previous.lives); deck_log_push(entry);
+        deck_feedback(0x6CFF8C, 75, 350);
     }
-    if(next.hearts>deck_previous.hearts) deck_log_push("HEARTS RESTORED");
+    if(next.lives>=0 && deck_previous.lives>=0 && next.lives<deck_previous.lives)
+        deck_feedback(0xFF3030, 90, 500);
+    if(next.hearts>deck_previous.hearts) {
+        char entry[64]; snprintf(entry,sizeof entry,"HEARTS RESTORED"); deck_log_push(entry);
+        deck_feedback(0x6CFF8C, 45, 180);
+    }
     if(next.coins>=0&&deck_previous.coins>=0&&next.coins>deck_previous.coins) {
         int milestone=next.coins/2500;
         if(milestone>deck_coin_milestone) {
             char entry[64]; snprintf(entry,sizeof entry,"COINS REACHED %05d",milestone*2500); deck_log_push(entry);
             deck_coin_milestone=milestone;
+            deck_feedback(0xFFD23C, 30, 100);
         }
     }
     deck_previous=next;
@@ -288,7 +473,10 @@ static void deck_open(void) {
     int displays=SDL_GetNumVideoDisplays();
     int x=24,y=40;
     if(displays>1) { x=SDL_WINDOWPOS_CENTERED_DISPLAY(1); y=SDL_WINDOWPOS_CENTERED_DISPLAY(1); }
-    deck_window=SDL_CreateWindow("PipeClean Companion Deck - Treasure Expedition",
+    deck_window=SDL_CreateWindow(
+        deck_profile == DECK_PROFILE_WARIO2
+            ? "PipeClean Companion Deck - Wario Land II"
+            : "PipeClean Companion Deck - Treasure Expedition",
         x,y,800,450,SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
     if(!deck_window) { fprintf(stderr,"Companion Deck window: %s\n",SDL_GetError()); deck_enabled=0; return; }
     SDL_SetWindowMinimumSize(deck_window,480,320);
@@ -297,10 +485,13 @@ static void deck_open(void) {
     if(!deck_renderer) { fprintf(stderr,"Companion Deck renderer: %s\n",SDL_GetError()); SDL_DestroyWindow(deck_window); deck_window=NULL; deck_enabled=0; return; }
     SDL_SetRenderDrawBlendMode(deck_renderer,SDL_BLENDMODE_BLEND);
     SDL_RenderSetLogicalSize(deck_renderer,800,450);
+    deck_set_led(deck_base_led_color());
 }
 static void deck_close(void) {
     if(deck_renderer) SDL_DestroyRenderer(deck_renderer);
     if(deck_window) SDL_DestroyWindow(deck_window);
+    if(deck_enabled) deck_set_led(0x000000);
+    deck_led_flash_active=0;
     deck_renderer=NULL; deck_window=NULL; deck_enabled=0;
 }
 static void deck_draw_chest(int cx,int cy) {
@@ -333,8 +524,14 @@ static void deck_draw_animation(void) {
     }
     deck_fill(246,206,308,44,43,31,17,238);
     deck_outline(246,206,308,44,255,214,107,255);
-    deck_text(327,214,1,255,235,165,"TREASURE FOUND!");
-    char text[48]; snprintf(text,sizeof text,"RELIC %02d ADDED TO YOUR VAULT",deck_treasure_anim_id);
+    deck_text_fit(258,214,285,1,255,235,165,
+                  deck_treasure_anim_kind ? "PICTURE PANEL FOUND!" : "TREASURE FOUND!");
+    char text[48];
+    if (deck_profile == DECK_PROFILE_WARIO2)
+        snprintf(text, sizeof text, "STAGE %02d COLLECTION UPDATED",
+                 deck_state.course > 0 ? deck_state.course : deck_treasure_anim_id);
+    else
+        snprintf(text, sizeof text, "RELIC %02d ADDED TO YOUR VAULT", deck_treasure_anim_id);
     deck_text_fit(265,232,270,1,247,233,208,text);
     for(int i=0;i<12;i++) {
         double a=6.2831853*i/12.0+phase*1.3;
@@ -343,9 +540,93 @@ static void deck_draw_animation(void) {
         deck_fill(400+(int)(cos(a)*distance),142+(int)(sin(a)*distance),size,size,255,(i%3)?200:243,107,255);
     }
 }
+static void deck_render_wario2(void) {
+    char value[64];
+    int treasure_count = deck_treasure_count();
+    int panel_count = deck_panel_count();
+
+    deck_color(25, 22, 18, 255);
+    SDL_RenderClear(deck_renderer);
+    for (int y = 0; y < 450; y += 6) deck_fill(0, y, 800, 1, 0, 0, 0, 18);
+
+    deck_fill(18, 7, 764, 49, 54, 47, 37, 250);
+    deck_outline(18, 7, 764, 49, 189, 133, 55, 255);
+    deck_fill(28, 14, 744, 3, 255, 200, 87, 255);
+    deck_text(28, 22, 1, 255, 200, 87, "PIPE CLEAN / TREASURE EXPEDITION");
+    deck_text_fit(28, 34, 730, 2, 255, 241, 212, "WARIO LAND II: THE STOLEN TREASURE");
+
+    deck_card(20, 70, 230, 118, "CURRENT ADVENTURE");
+    deck_text(34, 105, 1, 184, 170, 149, "CURRENT STAGE");
+    if (deck_state.course > 0) snprintf(value, sizeof value, "%02d / 50", deck_state.course);
+    else snprintf(value, sizeof value, "-- / 50");
+    deck_text_fit(34, 121, 180, 2, 255, 200, 87, value);
+    deck_text(34, 157, 1, 184, 170, 149,
+              deck_state.stage_select ? "NAVIGATION MAP" :
+              (deck_state.valid ? "STAGE IN PROGRESS" : "WAITING FOR STAGE"));
+    deck_text(34, 174, 1, 255, 241, 212,
+              deck_state.valid ? "TRACKING PROGRESS" : "START A STAGE TO LINK");
+
+    deck_draw_chest(400, 126);
+    deck_text_fit(323, 181, 156, 1, 255, 214, 107, "50 TREASURES / 50 PANELS");
+
+    deck_card(556, 70, 220, 118, "EXPEDITION LOG");
+    if (!deck_log_count) deck_text_fit(570, 119, 192, 1, 184, 170, 149, "NO EVENTS RECORDED");
+    for (int i = 0; i < deck_log_count && i < 3; ++i) {
+        int y = 112 + i * 23;
+        deck_fill(570, y, 3, 12, i == 0 ? 255 : 189, i == 0 ? 200 : 133, i == 0 ? 87 : 55, 255);
+        deck_text_fit(580, y + 1, 184, 1, i == 0 ? 255 : 184, i == 0 ? 241 : 170,
+                      i == 0 ? 212 : 149, deck_log[i]);
+    }
+
+    deck_card(20, 200, 370, 232, "TREASURE VAULT");
+    if (treasure_count >= 0)
+        snprintf(value, sizeof value, "%02d / 50 TREASURES", treasure_count);
+    else snprintf(value, sizeof value, "-- / 50 TREASURES");
+    deck_text_fit(34, 229, 340, 1, 255, 241, 212, value);
+    deck_fill(34, 242, 340, 5, 69, 54, 34, 255);
+    if (treasure_count > 0) deck_fill(34, 242, 340 * treasure_count / 50, 5, 255, 200, 87, 255);
+    for (int i = 0; i < 50; ++i) {
+        int x = 40 + (i % 10) * 34;
+        int y = 270 + (i / 10) * 29;
+        int found = deck_state.valid && (deck_state.treasure_mask & (UINT64_C(1) << i)) != 0;
+        deck_gem(x, y, 6, found);
+        snprintf(value, sizeof value, "%02d", i + 1);
+        deck_text_fit(x - 9, y + 8, 24, 1, found ? 255 : 133, found ? 200 : 119, found ? 87 : 89, value);
+    }
+
+    deck_card(402, 200, 374, 232, "PICTURE PANEL GALLERY");
+    if (panel_count >= 0)
+        snprintf(value, sizeof value, "%02d / 50 PANELS FOUND", panel_count);
+    else snprintf(value, sizeof value, "-- / 50 PANELS");
+    deck_text_fit(416, 229, 344, 1, 255, 241, 212, value);
+    deck_fill(416, 242, 346, 5, 69, 54, 34, 255);
+    if (panel_count > 0) deck_fill(416, 242, 346 * panel_count / 50, 5, 185, 160, 255, 255);
+    for (int i = 0; i < 50; ++i) {
+        int x = 423 + (i % 10) * 34;
+        int y = 270 + (i / 10) * 29;
+        int found = deck_state.valid && (deck_state.panel_mask & (UINT64_C(1) << i)) != 0;
+        deck_gem(x, y, 6, found);
+        snprintf(value, sizeof value, "%02d", i + 1);
+        deck_text_fit(x - 9, y + 8, 24, 1, found ? 223 : 133, found ? 198 : 119, found ? 255 : 89, value);
+    }
+    snprintf(value, sizeof value, "%05d BANK / %04d STAGE",
+             deck_state.coins >= 0 ? deck_state.coins : 0,
+             deck_state.stage_coins >= 0 ? deck_state.stage_coins : 0);
+    deck_text_fit(416, 404, 346, 1, 255, 214, 107, value);
+    deck_text_fit(416, 418, 346, 1, 184, 170, 149,
+                  deck_state.valid ? "COIN BANK / CURRENT STAGE COINS" : "COIN TOTALS APPEAR IN A STAGE");
+
+    if (deck_treasure_anim) deck_draw_animation();
+    SDL_RenderPresent(deck_renderer);
+}
+
 static void deck_render(void) {
     if(!deck_enabled||!deck_renderer||!deck_window) return;
     deck_update();
+    if (deck_profile == DECK_PROFILE_WARIO2) {
+        deck_render_wario2();
+        return;
+    }
     deck_color(29,24,18,255); SDL_RenderClear(deck_renderer);
     for(int y=0;y<450;y+=6) deck_fill(0,y,800,1,0,0,0,18);
     deck_fill(18,7,764,49,54,47,37,250); deck_outline(18,7,764,49,189,133,55,255);
@@ -435,6 +716,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!gb_blk0p) g_interp_only = 1;
+#ifndef HEADLESS
+    deck_profile = deck_detect_profile();
+#endif
     if (trace_path) gb_trace_load(trace_path);
     gb_reset();
     fprintf(stderr, "%s: %u banks, %s mode%s\n", rom, g_nbanks, g_cgb ? "CGB" : "DMG", g_interp_only ? ", interpreter only" : ", recompiled");
@@ -486,6 +770,7 @@ int main(int argc, char **argv) {
         if (ad) SDL_QueueAudio(ad, abuf, n * 4);
         SDL_UpdateTexture(t, NULL, g_fb, 160 * 4); SDL_RenderClear(r); SDL_RenderCopy(r, t, NULL, NULL); SDL_RenderPresent(r);
         deck_render();
+        deck_controller_frame();
         if ((++frame & 255) == 0) gb_save();
         if (ad) {   /* audio-clock pacing: wait until the device has drained below the target */
             while (run && SDL_GetQueuedAudioSize(ad) > (Uint32)target_bytes) SDL_Delay(1);
