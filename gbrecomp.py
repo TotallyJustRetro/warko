@@ -303,6 +303,8 @@ else
 endif
 ifeq ($(OS),Windows_NT)
   LIBS += -lcomdlg32 -static-libgcc
+else
+  LIBS += -lm
 endif
 CFLAGS := $(OPT) -w -I$(RT) $(CFLAGS_X)
 all: $(NAME)
