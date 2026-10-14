@@ -67,6 +67,13 @@ uint8_t gb_cart_ram_peek(uint16_t offset) {
     return sram[(uint32_t)offset % sram_size];
 }
 
+/* Read a physical CGB WRAM bank regardless of the currently mapped SVBK.
+   Offsets are in the 0x000-0xFFF range within the selected bank. */
+uint8_t gb_wram_peek_bank(uint8_t bank, uint16_t offset) {
+    if (bank > 7 || offset >= 0x1000) return 0xFF;
+    return wram[bank][offset];
+}
+
 /* ---------------------------------------------------------------- tracing */
 int gb_trace_load(const char *path) {
     if (!g_trace) g_trace = calloc(1, g_rom_size / 8 + 1);

@@ -262,10 +262,17 @@ static int deck_detect_profile(void) {
     }
     return strstr(title, "WARIOLAND2") ? DECK_PROFILE_WARIO2 : DECK_PROFILE_SML3;
 }
-static uint64_t deck_wario2_flag_mask(uint16_t start_address) {
+static uint8_t deck_wario2_ram_read(uint16_t offset) {
+    /* The GBC revision keeps this same state block in WRAM bank 1; the GB
+       release has it in bank 0. Read the physical bank so SVBK changes in the
+       game loop cannot make the deck flicker or read another game's data. */
+    if (g_cgb) return gb_wram_peek_bank(1, offset);
+    return gb_rd((uint16_t)(0xC000u + offset));
+}
+static uint64_t deck_wario2_flag_mask(uint16_t start_offset) {
     uint8_t bytes[WARIO2_FLAG_BYTES];
     for (int i = 0; i < WARIO2_FLAG_BYTES; ++i)
-        bytes[i] = gb_rd((uint16_t)(start_address + i));
+        bytes[i] = deck_wario2_ram_read((uint16_t)(start_offset + i));
     return wario2_flags_from_bytes(bytes);
 }
 static void deck_log_push(const char *entry) {
@@ -277,15 +284,17 @@ static WarioDeckState deck_read_state(void) {
     WarioDeckState d;
     memset(&d, 0, sizeof d);
     if (deck_profile == DECK_PROFILE_WARIO2) {
-        int stage = wario2_bcd_pair(gb_rd(0xC510));
+        int stage = wario2_bcd_pair(deck_wario2_ram_read(0x510));
         d.course = stage >= 1 && stage <= 50 ? stage : -1;
-        d.stage_select = gb_rd(0xC512) & 1;
-        d.coins = wario2_bcd3(gb_rd(0xC50B), gb_rd(0xC50C), gb_rd(0xC50D));
-        int coins_hi = wario2_bcd_pair(gb_rd(0xC50E));
-        int coins_lo = wario2_bcd_pair(gb_rd(0xC50F));
+        d.stage_select = deck_wario2_ram_read(0x512) & 1;
+        d.coins = wario2_bcd3(deck_wario2_ram_read(0x50B),
+                              deck_wario2_ram_read(0x50C),
+                              deck_wario2_ram_read(0x50D));
+        int coins_hi = wario2_bcd_pair(deck_wario2_ram_read(0x50E));
+        int coins_lo = wario2_bcd_pair(deck_wario2_ram_read(0x50F));
         d.stage_coins = coins_hi >= 0 && coins_lo >= 0 ? coins_hi * 100 + coins_lo : -1;
-        d.treasure_mask = deck_wario2_flag_mask(0xC504);
-        d.panel_mask = deck_wario2_flag_mask(0xC513);
+        d.treasure_mask = deck_wario2_flag_mask(0x504);
+        d.panel_mask = deck_wario2_flag_mask(0x513);
         d.lives = d.hearts = d.power = d.time_left = -1;
         d.valid = d.course >= 1 && d.course <= 50 && d.coins >= 0 &&
                   d.stage_coins >= 0;

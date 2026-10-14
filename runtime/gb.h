@@ -107,6 +107,7 @@ void gb_run_frame(void);
 void gb_set_joy(uint8_t bits);   /* 1=R 2=L 4=U 8=D 16=A 32=B 64=Select 128=Start */
 void gb_save(void);
 uint8_t gb_cart_ram_peek(uint16_t offset); /* Read cartridge SRAM directly for host-side companion overlays. */
+uint8_t gb_wram_peek_bank(uint8_t bank, uint16_t offset); /* Read a physical CGB WRAM bank independent of SVBK. */
 void gb_audio_read(int16_t *out, int frames);
 int  gb_audio_pull(int16_t *out, int max_frames);   /* queue-style audio: returns frames produced */
 extern float g_volume;                              /* 0..1, default 0.5 */
