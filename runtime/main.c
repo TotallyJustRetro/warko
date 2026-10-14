@@ -296,8 +296,9 @@ static WarioDeckState deck_read_state(void) {
         d.treasure_mask = deck_wario2_flag_mask(0x504);
         d.panel_mask = deck_wario2_flag_mask(0x513);
         d.lives = d.hearts = d.power = d.time_left = -1;
-        d.valid = d.course >= 1 && d.course <= 50 && d.coins >= 0 &&
-                  d.stage_coins >= 0;
+        /* Collection records and coin totals are valid even at the stage map.
+           Keep showing whole-game progress when Stage ID is temporarily unset. */
+        d.valid = d.coins >= 0 && d.stage_coins >= 0;
         return d;
     }
 
@@ -333,16 +334,18 @@ static void deck_update_wario2(const WarioDeckState *next) {
         memset(deck_log, 0, sizeof deck_log);
         deck_log_count = 0;
         deck_log_push("EXPEDITION LINKED");
-        char entry[64];
-        snprintf(entry, sizeof entry, "STAGE %02d ENTERED", next->course);
-        deck_log_push(entry);
+        if (next->course > 0) {
+            char entry[64];
+            snprintf(entry, sizeof entry, "STAGE %02d ENTERED", next->course);
+            deck_log_push(entry);
+        }
         deck_previous = *next;
         deck_baseline = 1;
         deck_coin_milestone = next->coins >= 0 ? next->coins / 100 : -1;
         return;
     }
 
-    if (next->course != deck_previous.course) {
+    if (next->course > 0 && next->course != deck_previous.course) {
         char entry[64];
         snprintf(entry, sizeof entry, "STAGE %02d ENTERED", next->course);
         deck_log_push(entry);
