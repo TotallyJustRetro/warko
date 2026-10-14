@@ -16,7 +16,8 @@ static void usage(const char *p) {
         "  --headless N     run N frames without a window (also: --mash, --shot FILE.ppm)\n"
         "  --mash           pseudo-random button input (for tracing/testing)\n"
         "  --shot FILE      write final frame as PPM\n"
-        "  --volume N       output volume in percent (default 50)\n", p);
+        "  --volume N       output volume in percent (default 50)\n"
+        "  --companion      open the live Wario Land Treasure Expedition deck\n", p);
 }
 
 static uint32_t rng = 0x1234567;
@@ -201,7 +202,7 @@ static int deck_bcd_coins(void) {
     return d0*10000+d1*1000+d2*100+d3*10+d4;
 }
 static int deck_bcd_time(void) {
-    int high=gb_cart_ram_peek(0x1964), low=gb_cart_ram_peek(0x1965);
+    int high=gb_cart_ram_peek(0x964), low=gb_cart_ram_peek(0x965);
     int hundreds=high&15, tens=(low>>4)&15, ones=low&15;
     if(high==0xFF||low==0xFF||hundreds>9||tens>9||ones>9) return -1;
     return hundreds*100+tens*10+ones;
